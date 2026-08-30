@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+
+# intermediate files written by tools/catalogue_extraction
+tools/catalogue_extraction/*_raw.json
+
+# the source catalogue PDF is not redistributed
+*.pdf

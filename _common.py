@@ -2,6 +2,24 @@
 
 from __future__ import annotations
 
+import os
+
+
+def data_path(path) -> str:
+    """Path string that ``open()`` can use past Windows' 260-char MAX_PATH.
+
+    Nothing here is deep on its own, but this package gets vendored -- into a
+    skill bundle, a plugin directory, a CI workspace -- and those paths can be
+    long. Once the absolute path crosses MAX_PATH the data files simply stop
+    existing as far as ``open()`` is concerned, with a FileNotFoundError that
+    points at a path you can see in the shell. The ``\\\\?\\`` prefix opts that
+    call out of the limit. No-op on POSIX, and on Windows only when needed.
+    """
+    p = os.path.abspath(os.fspath(path))
+    if os.name == "nt" and len(p) >= 250 and not p.startswith("\\\\?\\"):
+        return "\\\\?\\" + p
+    return p
+
 
 class Section:
     """A generic structural-section property bag.
