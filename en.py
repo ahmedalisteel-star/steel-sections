@@ -1,8 +1,8 @@
 """
 EN / Eurocode steel shapes.
 
-Two different data sources feed this module, matching the DRY_RUN note in
-the package docstring / README:
+Three different data sources feed this module, matching the note in the
+package docstring / README:
 
 1. IPE, HEA, HEB, HEM (hot-rolled I/H sections) and CHS, RHS, SHS (hollow
    sections) are looked up directly from JSON tables copied from the
@@ -24,6 +24,14 @@ the package docstring / README:
    10365 / EN 10056-1 -- treat them as a convenience subset and verify
    before production use (see README.md).
 
+3. IPN taper-flange beams, the HE AA / HE C and IPE AA/A/O/R/V variants,
+   and a batch of RHS/SHS sizes come from the DBMSC catalogue tables in
+   ``data/dbmsc_catalogue.json`` (see :mod:`steel_sections.dbmsc`). These
+   were added **additively**: every designation eurocodepy already
+   publishes still resolves to the eurocodepy row, and a lookup only falls
+   through to the catalogue when the eurocodepy table has no such size.
+   ``sec.source`` always names which table answered.
+
 Units: everything in this module is **cm-based** (cm, cm^2, cm^3, cm^4),
 matching how eurocodepy publishes its tables and how Eurocode 3
 calculations are usually done by hand. Dimension tables (h_mm etc.) stay
@@ -43,6 +51,12 @@ Usage
 ...
 >>> ss.en.Angle("L100x100x10").Iy
 ...
+>>> ss.en.IPN("IPN300").Iy      # cm^4, catalogue table
+9800.0
+>>> ss.en.IPE("IPE O 300").A    # IPE variant, catalogue table
+62.8
+>>> ss.en.HEAA("HEAA300").A     # cm^2, catalogue table
+88.9
 """
 
 from __future__ import annotations
@@ -52,7 +66,8 @@ import json
 import warnings
 from pathlib import Path
 
-from ._common import Section
+from . import dbmsc as _dbmsc
+from ._common import Section, data_path
 
 _DATA = Path(__file__).parent / "data"
 _UNITS_TABLE = "cm-based: cm, cm^2, cm^3, cm^4, kg/m (eurocodepy, LGPL-3.0)"
@@ -60,7 +75,7 @@ _UNITS_COMPUTED = "cm-based: cm, cm^2, cm^3, cm^4 (computed from dimensions via 
 
 
 def _load_json(name: str) -> dict:
-    with open(_DATA / name, encoding="utf-8") as f:
+    with open(data_path(_DATA / name), encoding="utf-8") as f:
         rows = json.load(f)
     return {row["Section"]: row for row in rows}
 
@@ -85,12 +100,38 @@ _CHS_IDX = _index(_CHS)
 _RHS_IDX = _index(_RHS)
 _SHS_IDX = _index(_SHS)
 
+# --------------------------------------------------------------------------
+# Catalogue fall-back: sizes the eurocodepy tables above do not carry
+# --------------------------------------------------------------------------
+# The DBMSC catalogue (see steel_sections.dbmsc) publishes the HE AA / HE C
+# and IPE AA/A/O/R/V variants that eurocodepy's I-profile table stops short
+# of, plus a batch of RHS/SHS sizes it does not list.  Those extras were
+# imported *additively*: nothing that eurocodepy already provides was taken
+# from the catalogue, so a designation only ever falls through to here when
+# the primary table genuinely has no row for it.  Anything resolved this way
+# reports ``source``/``units`` naming the catalogue, so you can always tell
+# which table a number came from.
+_CAT_FALLBACK = {
+    "I": {_normalize_hollow(d): d for d in _dbmsc.available("HE_IPE")},
+    "RHS": {_normalize_hollow(d): d for d in _dbmsc.available("RHS")},
+    "SHS": {_normalize_hollow(d): d for d in _dbmsc.available("SHS")},
+}
 
-def _lookup_table(idx: dict, designation: str, family: str, source: str) -> Section:
+
+def _lookup_table(idx: dict, designation: str, family: str, source: str,
+                  fallback: str | None = None) -> Section:
     key = _normalize_hollow(designation)
     row = idx.get(key)
     if row is None:
+        if fallback and key in _CAT_FALLBACK[fallback]:
+            cat_family = "HE_IPE" if fallback == "I" else fallback
+            sec = _dbmsc.section(cat_family, _CAT_FALLBACK[fallback][key])
+            return Section(designation=sec.designation, family=family,
+                           standard="EN", units=sec.units, source=sec.source,
+                           properties=sec.as_dict())
         matches = [k for k in idx if key.split("X")[0] in k][:8]
+        if fallback:
+            matches += [k for k in _CAT_FALLBACK[fallback] if key.split("X")[0] in k][:8]
         hint = f" Close matches: {matches}" if matches else ""
         raise KeyError(f"{designation!r} not found among EN {family} sections.{hint}")
     props = {k: v for k, v in row.items() if k != "Section"}
@@ -99,19 +140,47 @@ def _lookup_table(idx: dict, designation: str, family: str, source: str) -> Sect
 
 
 def IPE(designation: str) -> Section:
-    return _lookup_table(_I_PROFILES_IDX, designation, "IPE", "eurocodepy")
+    """e.g. IPE('IPE300'); the IPE AA/A/O/R/V variants resolve here too."""
+    return _lookup_table(_I_PROFILES_IDX, designation, "IPE", "eurocodepy", "I")
 
 
 def HEA(designation: str) -> Section:
-    return _lookup_table(_I_PROFILES_IDX, designation, "HEA", "eurocodepy")
+    return _lookup_table(_I_PROFILES_IDX, designation, "HEA", "eurocodepy", "I")
 
 
 def HEB(designation: str) -> Section:
-    return _lookup_table(_I_PROFILES_IDX, designation, "HEB", "eurocodepy")
+    return _lookup_table(_I_PROFILES_IDX, designation, "HEB", "eurocodepy", "I")
 
 
 def HEM(designation: str) -> Section:
-    return _lookup_table(_I_PROFILES_IDX, designation, "HEM", "eurocodepy")
+    return _lookup_table(_I_PROFILES_IDX, designation, "HEM", "eurocodepy", "I")
+
+
+def HEAA(designation: str) -> Section:
+    """Extra-light HE series, e.g. HEAA('HEAA300') -- catalogue-sourced."""
+    return _lookup_table(_I_PROFILES_IDX, designation, "HEAA", "dbmsc", "I")
+
+
+def HEC(designation: str) -> Section:
+    """HE C series (only HEC300 is rolled), catalogue-sourced."""
+    return _lookup_table(_I_PROFILES_IDX, designation, "HEC", "dbmsc", "I")
+
+
+def HE(designation: str) -> Section:
+    """Any HE shape by full designation: HE('HEB300'), HE('HEAA400')."""
+    return _lookup_table(_I_PROFILES_IDX, designation, "HE", "eurocodepy", "I")
+
+
+def IPN(designation: str) -> Section:
+    """Taper-flange I section to EN 10365 / DIN 1025-1, e.g. IPN('IPN300').
+
+    Flange slope 14%; the catalogue publishes ``tf`` at the reference point,
+    so ``d`` (depth between fillets) is the printed value rather than
+    ``h - 2*tf - 2*r1``.
+    """
+    sec = _dbmsc.section("IPN", designation)
+    return Section(designation=sec.designation, family="IPN", standard="EN",
+                   units=sec.units, source=sec.source, properties=sec.as_dict())
 
 
 def CHS(designation: str) -> Section:
@@ -121,20 +190,39 @@ def CHS(designation: str) -> Section:
 
 def RHS(designation: str) -> Section:
     """e.g. RHS('RHS150x100x6') -- h x b x wall thickness, mm."""
-    return _lookup_table(_RHS_IDX, designation, "RHS", "eurocodepy")
+    return _lookup_table(_RHS_IDX, designation, "RHS", "eurocodepy", "RHS")
 
 
 def SHS(designation: str) -> Section:
     """e.g. SHS('SHS100x100x6') -- b x b x wall thickness, mm."""
-    return _lookup_table(_SHS_IDX, designation, "SHS", "eurocodepy")
+    return _lookup_table(_SHS_IDX, designation, "SHS", "eurocodepy", "SHS")
 
 
 def available(family: str) -> list[str]:
-    table = {"IPE": _I_PROFILES, "HEA": _I_PROFILES, "HEB": _I_PROFILES,
-              "HEM": _I_PROFILES, "CHS": _CHS, "RHS": _RHS, "SHS": _SHS}[family.upper()]
-    if family.upper() in ("IPE", "HEA", "HEB", "HEM"):
-        return sorted(k for k in table if k.startswith(family.upper()))
-    return sorted(table)
+    """Designations available in an EN family, both tables merged."""
+    fam = family.upper()
+    if fam == "IPN":
+        return _dbmsc.available("IPN")
+    _I_FAMS = ("IPE", "IPEA", "IPEAA", "IPEO", "IPER", "IPEV",
+               "HE", "HEA", "HEAA", "HEB", "HEC", "HEM")
+    table = dict.fromkeys(_I_FAMS, _I_PROFILES)
+    table.update({"CHS": _CHS, "RHS": _RHS, "SHS": _SHS})
+    table = table[fam]
+    names = set(table)
+    if table is _I_PROFILES:
+        names |= set(_dbmsc.available("HE_IPE"))
+    elif fam in ("RHS", "SHS"):
+        names |= set(_dbmsc.available(fam))
+    if fam == "HE":
+        return sorted(n for n in names if n.startswith("HE"))
+    if table is _I_PROFILES:
+        # HEA must not swallow HEAA, nor IPE the IPE A/AA/O/R/V variants
+        siblings = {"HEA": ("HEAA",), "IPEA": ("IPEAA",),
+                    "IPE": ("IPEA", "IPEAA", "IPEO", "IPER", "IPEV")}
+        drop = siblings.get(fam, ("\0",))
+        return sorted(n for n in names
+                      if n.startswith(fam) and not n.startswith(drop))
+    return sorted(names)
 
 
 # --------------------------------------------------------------------------
@@ -142,7 +230,7 @@ def available(family: str) -> list[str]:
 # --------------------------------------------------------------------------
 
 def _read_csv(name: str) -> dict:
-    with open(_DATA / name, newline="", encoding="utf-8") as f:
+    with open(data_path(_DATA / name), newline="", encoding="utf-8") as f:
         return {row["designation"].upper(): row for row in csv.DictReader(f)}
 
 
